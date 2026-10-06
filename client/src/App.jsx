@@ -2,17 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import {
   Search,
-  Plus,
-  Phone,
-  Video,
-  MoreHorizontal,
-  Paperclip,
-  Smile,
   Send,
   CheckCheck,
-  Mic,
-  Settings,
-  Bell,
+  LogOut,
+  UserPlus,
+  LogIn,
   Menu,
   X
 } from "lucide-react";
@@ -20,411 +14,671 @@ import {
 const SERVER =
   import.meta.env.VITE_SERVER_URL || "http://localhost:4000";
 
-const users = [
-  { id: "ava", name: "Ava Wilson", avatar: "AW", status: "online", color: "purple" },
-  { id: "liam", name: "Liam Carter", avatar: "LC", status: "online", color: "blue" },
-  { id: "mia", name: "Mia Chen", avatar: "MC", status: "away", color: "pink" },
-  { id: "noah", name: "Noah Brown", avatar: "NB", status: "offline", color: "green" },
-  { id: "sophia", name: "Sophia Kim", avatar: "SK", status: "online", color: "orange" }
-];
+function Avatar({ username, small = false }) {
+  const letters = username
+    ? username.slice(0, 2).toUpperCase()
+    : "?";
 
-const startingMessages = {
-  ava: [
-    {
-      id: 1,
-      text: "Hey! Are we still on for the project review?",
-      time: "10:42 AM",
-      mine: false
-    },
-    {
-      id: 2,
-      text: "Absolutely. I finished the new dashboard screens.",
-      time: "10:44 AM",
-      mine: true
-    },
-    {
-      id: 3,
-      text: "Nice! Send them over when you can 👀",
-      time: "10:45 AM",
-      mine: false
-    }
-  ],
-  liam: [
-    {
-      id: 4,
-      text: "That animation looks really smooth.",
-      time: "Yesterday",
-      mine: false
-    }
-  ],
-  mia: [
-    {
-      id: 5,
-      text: "Can you review the copy later?",
-      time: "Yesterday",
-      mine: false
-    }
-  ],
-  noah: [
-    {
-      id: 6,
-      text: "Thanks!",
-      time: "Mon",
-      mine: false
-    }
-  ],
-  sophia: [
-    {
-      id: 7,
-      text: "See you tomorrow!",
-      time: "Sun",
-      mine: false
-    }
-  ]
-};
-
-function Avatar({ user, small = false, online = false }) {
   return (
-    <div className={`avatar ${user.color} ${small ? "small" : ""}`}>
-      {user.avatar}
-      {online && <span className="online-dot" />}
+    <div className={`avatar blue ${small ? "small" : ""}`}>
+      {letters}
     </div>
   );
 }
 
 export default function App() {
-  const [selected, setSelected] = useState("ava");
-  const [messages, setMessages] = useState(startingMessages);
-  const [text, setText] = useState("");
+  const [token, setToken] = useState(
+    () => localStorage.getItem("orbit_token") || ""
+  );
+
+  const [me, setMe] = useState(null);
+  const [mode, setMode] = useState("login");
+
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState("");
+
   const [search, setSearch] = useState("");
-  const [typing, setTyping] = useState(false);
-  const [mobileSidebar, setMobileSidebar] = useState(false);
+  const [users, setUsers] = useState([]);
+  const [selected, setSelected] = useState(null);
+
+  const [messages, setMessages] = useState([]);
+  const [text, setText] = useState("");
+
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [loadingMessages, setLoadingMessages] = useState(false);
 
   const bottomRef = useRef(null);
 
-  const socket = useMemo(
-    () => io(SERVER, { autoConnect: false }),
-    []
-  );
+  const socket = useMemo(() => {
+    return io(SERVER, {
+      autoConnect: false
+    });
+  }, []);
 
-  const currentUser = users.find((u) => u.id === selected);
-
-  const filteredUsers = users.filter((u) =>
-    u.name.toLowerCase().includes(search.toLowerCase())
-  );
+  // =========================
+  // GET CURRENT USER
+  // =========================
 
   useEffect(() => {
+    if (!token) return;
+
+    fetch(`${SERVER}/api/auth/me`, {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    })
+      .then(async (res) => {
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.message || "Login expired");
+        }
+
+        setMe(data.user);
+      })
+      .catch(() => {
+        localStorage.removeItem("orbit_token");
+        setToken("");
+        setMe(null);
+      });
+  }, [token]);
+
+  // =========================
+  // SOCKET
+  // =========================
+
+  useEffect(() => {
+    if (!me) return;
+
     socket.connect();
 
-    socket.emit("join", "demo-user");
-
-    socket.on("typing", ({ userId }) => {
-      if (userId === selected) {
-        setTyping(true);
-
-        setTimeout(() => {
-          setTyping(false);
-        }, 1200);
-      }
+    socket.on("connect", () => {
+      socket.emit("join", me._id);
     });
 
     socket.on("message", (message) => {
-      if (message.to === "demo-user") {
-        setMessages((prev) => ({
-          ...prev,
-          [message.from]: [
-            ...(prev[message.from] || []),
-            {
-              ...message,
-              mine: false
-            }
-          ]
-        }));
+      const isMyChat =
+        selected &&
+        (
+          (message.from === me._id &&
+            message.to === selected._id) ||
+          (message.from === selected._id &&
+            message.to === me._id)
+        );
+
+      if (isMyChat) {
+        setMessages((prev) => {
+          const exists = prev.some(
+            (item) =>
+              item.createdAt === message.createdAt &&
+              item.text === message.text &&
+              item.from === message.from
+          );
+
+          if (exists) return prev;
+
+          return [...prev, message];
+        });
       }
     });
 
-    return () => socket.disconnect();
-  }, []);
+    return () => {
+      socket.off("connect");
+      socket.off("message");
+      socket.disconnect();
+    };
+  }, [me, selected]);
+
+  // =========================
+  // SCROLL
+  // =========================
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({
       behavior: "smooth"
     });
-  }, [messages, selected, typing]);
+  }, [messages]);
+
+  // =========================
+  // LOGIN / SIGNUP
+  // =========================
+
+  async function handleAuth(e) {
+    e.preventDefault();
+
+    setAuthError("");
+
+    const cleanUsername = username.trim().toLowerCase();
+
+    if (!cleanUsername || !password) {
+      setAuthError("Username aur password required hai.");
+      return;
+    }
+
+    setAuthLoading(true);
+
+    try {
+      const endpoint =
+        mode === "login"
+          ? "/api/auth/login"
+          : "/api/auth/signup";
+
+      const response = await fetch(
+        `${SERVER}${endpoint}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            username: cleanUsername,
+            password
+          })
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message || "Something went wrong"
+        );
+      }
+
+      localStorage.setItem(
+        "orbit_token",
+        data.token
+      );
+
+      setToken(data.token);
+      setMe(data.user);
+
+      setUsername("");
+      setPassword("");
+    } catch (error) {
+      setAuthError(error.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  // =========================
+  // LOGOUT
+  // =========================
+
+  function logout() {
+    localStorage.removeItem("orbit_token");
+
+    setToken("");
+    setMe(null);
+    setUsers([]);
+    setSelected(null);
+    setMessages([]);
+    setText("");
+  }
+
+  // =========================
+  // SEARCH USERS
+  // =========================
+
+  async function searchUsers(value) {
+    setSearch(value);
+
+    if (!value.trim() || !token) {
+      setUsers([]);
+      return;
+    }
+
+    setLoadingUsers(true);
+
+    try {
+      const response = await fetch(
+        `${SERVER}/api/users/search?q=${encodeURIComponent(
+          value
+        )}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        }
+      );
+
+      const data = await response.json();
+
+      if (response.ok) {
+        setUsers(data);
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoadingUsers(false);
+    }
+  }
+
+  // =========================
+  // OPEN CHAT
+  // =========================
+
+  async function openChat(user) {
+    setSelected(user);
+    setMessages([]);
+    setUsers([]);
+    setSearch("");
+
+    setLoadingMessages(true);
+
+    try {
+      const response = await fetch(
+        `${SERVER}/api/messages/${user._id}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        }
+      );
+
+      const data = await response.json();
+
+      if (response.ok) {
+        setMessages(data);
+      }
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoadingMessages(false);
+    }
+  }
+
+  // =========================
+  // SEND MESSAGE
+  // =========================
 
   function sendMessage() {
     const value = text.trim();
 
-    if (!value) return;
+    if (!value || !selected || !me) return;
 
     const message = {
-      id: Date.now(),
-      from: "demo-user",
-      to: selected,
-      text: value,
-      time: new Date().toLocaleTimeString([], {
-        hour: "numeric",
-        minute: "2-digit"
-      }),
-      mine: true
+      from: me._id,
+      to: selected._id,
+      text: value
     };
 
-    setMessages((prev) => ({
-      ...prev,
-      [selected]: [...(prev[selected] || []), message]
-    }));
-
     socket.emit("message", message);
+
     setText("");
   }
+
+  // =========================
+  // AUTH SCREEN
+  // =========================
+
+  if (!me) {
+    return (
+      <div className="auth-page">
+        <div className="auth-card">
+
+          <div className="logo">✦</div>
+
+          <h1>Orbit</h1>
+
+          <p>
+            {mode === "login"
+              ? "Welcome back"
+              : "Create your account"}
+          </p>
+
+          <form onSubmit={handleAuth}>
+
+            <input
+              type="text"
+              placeholder="Username"
+              value={username}
+              onChange={(e) =>
+                setUsername(e.target.value)
+              }
+              autoComplete="username"
+            />
+
+            <input
+              type="password"
+              placeholder="Password"
+              value={password}
+              onChange={(e) =>
+                setPassword(e.target.value)
+              }
+              autoComplete={
+                mode === "login"
+                  ? "current-password"
+                  : "new-password"
+              }
+            />
+
+            {authError && (
+              <div className="auth-error">
+                {authError}
+              </div>
+            )}
+
+            <button
+              className="auth-button"
+              disabled={authLoading}
+            >
+              {authLoading ? (
+                "Please wait..."
+              ) : mode === "login" ? (
+                <>
+                  <LogIn size={18} />
+                  Login
+                </>
+              ) : (
+                <>
+                  <UserPlus size={18} />
+                  Create account
+                </>
+              )}
+            </button>
+          </form>
+
+          <button
+            className="switch-auth"
+            onClick={() => {
+              setMode(
+                mode === "login"
+                  ? "signup"
+                  : "login"
+              );
+              setAuthError("");
+            }}
+          >
+            {mode === "login"
+              ? "Create a new account"
+              : "Already have an account? Login"}
+          </button>
+
+        </div>
+      </div>
+    );
+  }
+
+  // =========================
+  // CHAT APP
+  // =========================
 
   return (
     <div className="app">
 
-      <aside className={`sidebar ${mobileSidebar ? "show" : ""}`}>
+      <aside className="sidebar">
 
         <div className="brand">
           <div className="logo">✦</div>
           <strong>Orbit</strong>
-
-          <button
-            className="close-mobile"
-            onClick={() => setMobileSidebar(false)}
-          >
-            <X size={20} />
-          </button>
         </div>
 
         <div className="profile">
-          <Avatar
-            user={{
-              avatar: "JD",
-              color: "blue"
-            }}
-            online
-          />
+
+          <Avatar username={me.username} />
 
           <div>
-            <strong>Jordan Davis</strong>
-            <small>Available</small>
+            <strong>@{me.username}</strong>
+            <small>Online</small>
           </div>
 
-          <MoreHorizontal size={18} />
+          <button
+            className="logout-button"
+            onClick={logout}
+            title="Logout"
+          >
+            <LogOut size={17} />
+          </button>
+
         </div>
 
         <div className="search-box">
+
           <Search size={17} />
 
           <input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search people..."
+            onChange={(e) =>
+              searchUsers(e.target.value)
+            }
+            placeholder="Search users..."
           />
+
         </div>
+
+        {search.trim() && (
+          <div className="search-results">
+
+            {loadingUsers && (
+              <p className="empty-text">
+                Searching...
+              </p>
+            )}
+
+            {!loadingUsers &&
+              users.length === 0 && (
+                <p className="empty-text">
+                  No users found
+                </p>
+              )}
+
+            {users.map((user) => (
+              <button
+                className="user-item"
+                key={user._id}
+                onClick={() =>
+                  openChat(user)
+                }
+              >
+                <Avatar
+                  username={user.username}
+                />
+
+                <div className="user-info">
+                  <strong>
+                    @{user.username}
+                  </strong>
+
+                  <p>
+                    Tap to chat
+                  </p>
+                </div>
+              </button>
+            ))}
+
+          </div>
+        )}
 
         <div className="messages-title">
-          <span>MESSAGES</span>
-          <Plus size={17} />
+          <span>CHAT</span>
         </div>
 
-        <div className="user-list">
+        {!selected && (
+          <div className="empty-sidebar">
+            Search a username above to start chatting.
+          </div>
+        )}
 
-          {filteredUsers.map((user) => (
-            <button
-              key={user.id}
-              className={`user-item ${
-                selected === user.id ? "selected" : ""
-              }`}
-              onClick={() => {
-                setSelected(user.id);
-                setMobileSidebar(false);
-              }}
-            >
-              <Avatar
-                user={user}
-                online={user.status === "online"}
-              />
+        {selected && (
+          <button className="user-item selected">
+            <Avatar
+              username={selected.username}
+              online
+            />
 
-              <div className="user-info">
-                <div className="user-name">
-                  <strong>{user.name}</strong>
-                  <span>
-                    {messages[user.id]?.at(-1)?.time || ""}
-                  </span>
-                </div>
+            <div className="user-info">
+              <strong>
+                @{selected.username}
+              </strong>
 
-                <p>
-                  {messages[user.id]?.at(-1)?.text ||
-                    "Start a conversation"}
-                </p>
-              </div>
-            </button>
-          ))}
-
-        </div>
-
-        <div className="sidebar-footer">
-          <button>
-            <Bell size={18} />
-            Notifications
+              <p>
+                Active chat
+              </p>
+            </div>
           </button>
+        )}
 
-          <button>
-            <Settings size={18} />
-            Settings
-          </button>
-        </div>
       </aside>
 
       <main className="chat">
 
-        <header className="header">
+        {!selected ? (
+          <div className="welcome-screen">
+            <div className="logo">✦</div>
 
-          <button
-            className="mobile-menu"
-            onClick={() => setMobileSidebar(true)}
-          >
-            <Menu size={21} />
-          </button>
+            <h2>Welcome to Orbit</h2>
 
-          <Avatar
-            user={currentUser}
-            online={currentUser.status === "online"}
-          />
-
-          <div className="header-user">
-            <strong>{currentUser.name}</strong>
-
-            <span>
-              <i className={currentUser.status} />
-              {currentUser.status === "online"
-                ? "Active now"
-                : currentUser.status}
-            </span>
+            <p>
+              Search for a username to start a
+              conversation.
+            </p>
           </div>
+        ) : (
+          <>
+            <header className="header">
 
-          <div className="header-actions">
-            <button>
-              <Phone size={19} />
-            </button>
-
-            <button>
-              <Video size={20} />
-            </button>
-
-            <button>
-              <MoreHorizontal size={20} />
-            </button>
-          </div>
-        </header>
-
-        <section className="messages">
-
-          <div className="today">
-            <span>Today</span>
-          </div>
-
-          {(messages[selected] || []).map((message) => (
-            <div
-              key={message.id}
-              className={`message-row ${
-                message.mine ? "mine" : ""
-              }`}
-            >
-
-              {!message.mine && (
-                <Avatar
-                  user={currentUser}
-                  small
-                />
-              )}
-
-              <div className="message-wrapper">
-
-                <div className="bubble">
-                  {message.text}
-                </div>
-
-                <div className="message-meta">
-                  {message.time}
-
-                  {message.mine && (
-                    <CheckCheck size={14} />
-                  )}
-                </div>
-
-              </div>
-            </div>
-          ))}
-
-          {typing && (
-            <div className="typing">
               <Avatar
-                user={currentUser}
-                small
+                username={selected.username}
+                online
               />
 
-              <div className="typing-box">
-                <span />
-                <span />
-                <span />
+              <div className="header-user">
+
+                <strong>
+                  @{selected.username}
+                </strong>
+
+                <span>
+                  <i className="online" />
+                  Online
+                </span>
+
               </div>
-            </div>
-          )}
 
-          <div ref={bottomRef} />
-        </section>
+            </header>
 
-        <footer className="composer-area">
+            <section className="messages">
 
-          <div className="composer">
+              {loadingMessages && (
+                <div className="empty-text">
+                  Loading messages...
+                </div>
+              )}
 
-            <button>
-              <Paperclip size={19} />
-            </button>
+              {!loadingMessages &&
+                messages.length === 0 && (
+                  <div className="empty-chat">
+                    <Avatar
+                      username={selected.username}
+                    />
 
-            <input
-              value={text}
-              onChange={(e) => {
-                setText(e.target.value);
+                    <strong>
+                      @{selected.username}
+                    </strong>
 
-                socket.emit("typing", {
-                  userId: selected
-                });
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  sendMessage();
-                }
-              }}
-              placeholder={`Message ${currentUser.name.split(" ")[0]}...`}
-            />
+                    <p>
+                      No messages yet. Say hello!
+                    </p>
+                  </div>
+                )}
 
-            <button>
-              <Smile size={19} />
-            </button>
+              {messages.map((message, index) => {
 
-            {text.trim() ? (
-              <button
-                className="send"
-                onClick={sendMessage}
-              >
-                <Send size={17} />
-              </button>
-            ) : (
-              <button>
-                <Mic size={19} />
-              </button>
-            )}
+                const mine =
+                  message.from === me._id;
 
-          </div>
+                return (
+                  <div
+                    key={
+                      message._id ||
+                      `${message.createdAt}-${index}`
+                    }
+                    className={`message-row ${
+                      mine ? "mine" : ""
+                    }`}
+                  >
 
-          <small>
-            Press Enter to send · Realtime messaging
-          </small>
+                    {!mine && (
+                      <Avatar
+                        username={
+                          selected.username
+                        }
+                        small
+                      />
+                    )}
 
-        </footer>
+                    <div className="message-wrapper">
+
+                      <div className="bubble">
+                        {message.text}
+                      </div>
+
+                      <div className="message-meta">
+
+                        {new Date(
+                          message.createdAt
+                        ).toLocaleTimeString([], {
+                          hour: "numeric",
+                          minute: "2-digit"
+                        })}
+
+                        {mine && (
+                          <CheckCheck size={14} />
+                        )}
+
+                      </div>
+
+                    </div>
+
+                  </div>
+                );
+              })}
+
+              <div ref={bottomRef} />
+
+            </section>
+
+            <footer className="composer-area">
+
+              <div className="composer">
+
+                <input
+                  value={text}
+                  onChange={(e) =>
+                    setText(e.target.value)
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      sendMessage();
+                    }
+                  }}
+                  placeholder={`Message @${selected.username}...`}
+                />
+
+                <button
+                  className="send"
+                  onClick={sendMessage}
+                  disabled={!text.trim()}
+                >
+                  <Send size={17} />
+                </button>
+
+              </div>
+
+              <small>
+                Enter to send · Realtime messaging
+              </small>
+
+            </footer>
+          </>
+        )}
+
       </main>
     </div>
   );
-}
+            }
